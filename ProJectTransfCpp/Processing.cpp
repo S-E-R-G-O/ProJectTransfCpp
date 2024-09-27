@@ -1,87 +1,96 @@
 #include "Processing.h"
 #include "TrackingBox.h"
-using namespace cv;
-using namespace std;
 
+// Реализация конструктора класса Processing
 Processing::Processing(const string& fileName1, const string& fileName2) : isFrame(true)
 {
-	stream1.open(fileName1);
-	if (!stream1.isOpened())
-	{
-		throw runtime_error("Could not open video stream");
-	}
+    // Открываем видеопотоки: первый и второй
+    if (!stream1.open(fileName1) || !stream2.open(fileName2))
+    {
+        throw runtime_error("Не удалось открыть видеопотоки: " + fileName1 + " или " + fileName2);
+    }
 
-	stream2.open(fileName2);
-	if (!stream1.isOpened())
-	{
-		throw runtime_error("Could not open video stream");
-	}
+    background = Mat(); // Инициализация фона как пустой матрицы
 }
 
+// Реализация деструктора
 Processing::~Processing()
 {
-	stream1.release();
-	stream2.release();
-	destroyAllWindows();
+    // Освобождение ресурсов видеопотоков
+    stream1.release(); // Освобождение ресурсов первого видеопотока
+    stream2.release(); // Освобождение ресурсов второго видеопотока
 }
 
+// Метод для обнаружения изменений между двумя видеопотоками
 void Processing::detectedChanges()
 {
-	Mat frame1, frame2, grayFrame1;
+    Mat frame1, frame2, grayFrame1; // Матрицы для хранения кадров и их серой версии
 
-	while (true)
-	{
-		stream1 >> frame1;
-		stream2 >> frame2;
+    while (true) // Бесконечный цикл для обработки кадров
+    {
+        // Чтение кадров из обоих видеопотоков
+        stream1 >> frame1;
+        stream2 >> frame2;
 
-		if (frame1.empty() || frame2.empty())
-		{
-			cout << "Frame is empty" << endl;
-			break;
-		}
-		hconcat(frame1, frame2, frame1);
+        // Проверяем, были ли прочитаны оба кадра
+        if (frame1.empty() || frame2.empty()) // Проверка на пустые кадры
+        {
+            cout << "Один из кадров пуст; остановка обработки." << endl;
+            break; // Выход из цикла, если хотя бы один кадр пуст
+        }
 
-		cvtColor(frame1, grayFrame1, COLOR_BGR2GRAY);
+        // Соединяем оба кадра в один
+        hconcat(frame1, frame2, frame1);
 
-		if (isFrame)
-		{
-			previousFrame = grayFrame1;
-			isFrame = false;
-			continue;
-		}
-		processingFrame(frame1, grayFrame1);
-		previousFrame = grayFrame1.clone();
+        // Преобразуем объединенный кадр в оттенки серого
+        cvtColor(frame1, grayFrame1, COLOR_BGR2GRAY);
 
-		if (waitKey(10) == 27)
-		{
-			break;
-		}
-	}
+        // Обрабатываем текущий кадр
+        processingFrame(frame1, grayFrame1);
+
+        // Проверка нажатия клавиши ESC для выхода из цикла
+        if (waitKey(10) == 27)
+        {
+            break;
+        }
+    }
 }
 
+// Метод для обработки текущего кадра
 void Processing::processingFrame(Mat& frame, Mat& grayFrame)
 {
-	Mat difference, thresh, dilated, frameBlur;
+    Mat difference, thresh, dilated, frameBlur; // Матрицы для хранения промежуточных результатов
 
-	absdiff(previousFrame, grayFrame, difference);
+    // Накапливаем фон для обнаружения изменений
+    if (background.empty())
+    {
+        background = Mat::zeros(grayFrame.size(), CV_32F); // Создаем пустую матрицу для фона
+        grayFrame.convertTo(background, CV_32F); // Инициализируем фон первым серым кадром
+    }
+    else
+    {
+        // Накапливаем фон с заданным весом
+        accumulateWeighted(grayFrame, background, 0.15);
+    }
 
-	threshold(difference, thresh, 20, 255, THRESH_BINARY);
+    // Вычисляем абсолютную разность между фоном и текущим кадром
+    Mat backgroundupd;
+    background.convertTo(backgroundupd, CV_8U); // Преобразование фона в 8-битный формат
+    absdiff(backgroundupd, grayFrame, difference); // Вычисление разности
 
-	dilate(thresh, dilated, Mat(), Point(-1, -1), 4);
+    // Применяем пороговую обработку и морфологические операции
+    threshold(difference, thresh, 30, 255, THRESH_BINARY); // Пороговая фильтрация
+    dilate(thresh, dilated, Mat(), Point(-1, -1), 4); // Увеличение областей с помощью диляции
+    GaussianBlur(dilated, frameBlur, Size(5, 5), 0, 0); // Размытие для уменьшения шумов
 
-	GaussianBlur(dilated, frameBlur, Size(5, 5), 0, 0);
+    vector<vector<Point>> contours; // Вектор для хранения найденных контуров
+    findContours(frameBlur, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE); // Поиск внешних контуров
 
-	vector<vector<Point>> contours;
+    // Создаём блоки отслеживания по найденным контурам
+    vector<TrackingBox> boxes = TrackingBox::createBoxes(contours);
+    TrackingBox::drawBoxes(frame, boxes); // Рисуем блоки на кадре
 
-	findContours(frameBlur, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-	vector<TrackingBox> boxes = TrackingBox::createBoxes(contours);
-
-	TrackingBox::drawBoxes(frame, boxes);
-
-
-
-	imshow("Combined Video", frame);
-	imshow("Masked Video", thresh);
-
+    // Отображение результатов
+    imshow("Combined Video", frame); // Отображаем объединенное видео
+    imshow("Masked Video", thresh); // Отображаем бинарную маску
 }
